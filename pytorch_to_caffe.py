@@ -251,8 +251,9 @@ def _pool(type, raw, input, x, kernel_size, stride, padding, ceil_mode):
     layer.pool_param(kernel_size=kernel_size,
                      stride=kernel_size if stride is None else stride,
                      pad=padding,
-                     type=type.upper(),
-                     ceil_mode=ceil_mode)
+                     type=type.upper())
+                     # caffe doesn't have ceil_mode
+                     # ceil_mode=ceil_mode)
     log.cnet.add_layer(layer)
     if ceil_mode == False and stride is not None:
         oheight = (input.size()[2] - _pair(kernel_size)[0] +
@@ -797,7 +798,7 @@ def _mul(input, *args):
         type='Eltwise',
         bottom=[log.blobs(input), log.blobs(args[0])],
         top=top_blobs)
-    layer.param.eltwise_param.operation = 0  # product is 1
+    layer.param.eltwise_param.operation = 0  # product is 0
     log.cnet.add_layer(layer)
     return x
 

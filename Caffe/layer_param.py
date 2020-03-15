@@ -115,7 +115,8 @@ class Layer_param():
         pool_param.pool=pool_param.PoolMethod.Value(type)
         pool_param.kernel_size=pair_process(kernel_size)
         pool_param.stride=pair_process(stride)
-        pool_param.ceil_mode=ceil_mode
+        # caffe doesn't support ceil_mode
+        # pool_param.ceil_mode=ceil_mode
         if pad:
             if isinstance(pad,tuple):
                 pool_param.pad_h = pad[0]
