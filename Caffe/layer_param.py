@@ -109,6 +109,12 @@ class Layer_param():
 
         self.param.permute_param.CopyFrom(permute_param)
 
+    def parameter_param(self, shape):
+        parameter_param = pb.ParameterParameter()
+        parameter_param.shape.dim.extend(shape)
+
+        self.param.parameter_param.CopyFrom(parameter_param)
+
 
     def pool_param(self,type='MAX',kernel_size=2,stride=2,pad=None, ceil_mode = True):
         pool_param=pb.PoolingParameter()
@@ -148,6 +154,7 @@ class Layer_param():
     # }
     def upsample_param(self,size=None, scale_factor=None):
         upsample_param=pb.UpsampleParameter()
+        scale_factor = int(scale_factor)
         if scale_factor:
             if isinstance(scale_factor,int):
                 upsample_param.scale = scale_factor

@@ -11,3 +11,14 @@ __pycache__/
 
 *.pth
 
+.DS_Store
+
+efficientdet_d0.py
+
+efficientnet_b0.py
+
+export_efficientdet_d0.py
+
+export_efficientnet_b0.py
+
+extras.py

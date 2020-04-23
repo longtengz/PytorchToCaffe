@@ -634,6 +634,8 @@ message LayerParameter {
   optional MatMulParameter matmul_param = 100005;
   optional PassThroughParameter pass_through_param = 100004;
   //optional NormalizeParameter norm_param = 100001;
+
+  optional ParameterParameter parameter_param = 100006;
 }
 
 //*********************add by wdd******************

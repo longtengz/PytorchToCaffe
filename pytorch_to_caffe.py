@@ -78,7 +78,6 @@ class TransLog(object):
         return self.layers[name]
 
     def add_blobs(self, blobs, name='blob', with_num=True):
-        print('called add_blobs')
         rst = []
         for blob in blobs:
             self._blobs_data.append(
@@ -87,6 +86,7 @@ class TransLog(object):
             if name not in self.detail_blobs.keys():
                 self.detail_blobs[name] = 0
             self.detail_blobs[name] += 1
+            print('called add_blobs, name %s%s' % (name, self.detail_blobs[name]))
             if with_num:
                 rst.append('{}{}'.format(name, self.detail_blobs[name]))
             else:
@@ -97,14 +97,81 @@ class TransLog(object):
             self._blobs[blob_id] = rst[-1]
         return rst
 
+    def add_parameter_blob(self, x):
+        least_shape_blob = None
+        least_volume = None
+        min_volume = 6
+
+        for blob in self._blobs_data:
+            if type(blob) is not float:
+                volume = np.prod(blob.shape)
+
+                if volume < min_volume:
+                    continue
+
+                if least_volume is None or least_volume > volume:
+                    least_volume = volume
+                    least_shape_blob = blob
+
+
+        layer_name = log.add_layer(name='parameter')
+        top_blobs = log.add_blobs([x], name='parameter_blob')
+
+        if type(x) is float or x.dim() == 0:
+            flattened = torch.flatten(least_shape_blob)
+            mean = flattened.mean(dim=0)
+            layer = caffe_net.Layer_param(
+                name=layer_name,
+                type='Power',
+                bottom=[log.blobs(mean)],
+                top=top_blobs
+            )
+            layer.param.power_param.power = 1
+            layer.param.power_param.scale = 0
+            if type(x) is float:
+                layer.param.power_param.shift = x
+            else:
+                layer.param.power_param.shift = float(x.numpy())
+            log.cnet.add_layer(layer)
+        elif x.dim() == 1:
+            reshaped = least_shape_blob.contiguous().view(-1, 1)
+            splitted, _ = torch.split(reshaped, [1, reshaped.shape[0]-1], dim=0)
+            bottom_blobs = []
+            for ele in x:
+                ele = ele.unsqueeze(0)
+
+                middle_layer_name = log.add_layer(name='middle_parameter')
+                middle_blobs = log.add_blobs([ele], name='ele_parameter_blob')
+                bottom_blobs.append(log.blobs(ele))
+                layer = caffe_net.Layer_param(
+                    name=middle_layer_name,
+                    type='Power',
+                    bottom=[log.blobs(splitted)],
+                    top=middle_blobs
+                )
+                layer.param.power_param.power = 1
+                layer.param.power_param.scale = 0
+                layer.param.power_param.shift = float(ele.numpy())
+                log.cnet.add_layer(layer)
+
+            layer = caffe_net.Layer_param(name=layer_name,
+                                          type='Concat',
+                                          bottom=bottom_blobs,
+                                          top=top_blobs)
+            layer.param.concat_param.axis = 0
+            log.cnet.add_layer(layer)
+            return x
+
+
     def blobs(self, var):
+        # old_var = var
         var = id(var)
         # if self.debug:
         #     print("{}:{} getting".format(var, self._blobs[var]))
         try:
             return self._blobs[var]
         except:
-            print("WARNING: CANNOT FOUND blob {}".format(var))
+            # print("WARNING: CANNOT FOUND blob {}, {}".format(var, old_var))
             return None
 
 
@@ -121,7 +188,6 @@ def _conv2d(raw,
             padding=0,
             dilation=1,
             groups=1):
-    print('conv: ', log.blobs(input))
     x = raw(input, weight, bias, stride, padding, dilation, groups)
     name = log.add_layer(name='conv')
     log.add_blobs([x], name='conv_blob')
@@ -334,8 +400,8 @@ def _max(raw, *args):
     return x
 
 
-def _cat(raw, inputs, dimension=0):
-    x = raw(inputs, dimension)
+def _cat(raw, inputs, dim=0):
+    x = raw(inputs, dim)
     bottom_blobs = []
     for i in inputs:
         bottom_blobs.append(log.blobs(i))
@@ -345,7 +411,7 @@ def _cat(raw, inputs, dimension=0):
                                   type='Concat',
                                   bottom=bottom_blobs,
                                   top=top_blobs)
-    layer.param.concat_param.axis = dimension
+    layer.param.concat_param.axis = dim
     log.cnet.add_layer(layer)
     return x
 
@@ -397,6 +463,10 @@ def _threshold(raw, input, threshold, value, inplace=False):
 def _relu(raw, input, inplace=False):
     # for threshold or prelu
     x = raw(input, False)
+
+    if log.blobs(input) is None:
+        log.add_parameter_blob(input)
+
     name = log.add_layer(name='relu')
     log.add_blobs([x], name='relu_blob')
     layer = caffe_net.Layer_param(name=name,
@@ -578,19 +648,37 @@ def _interpolate(raw,
     # for nearest _interpolate
     if mode != "nearest" or align_corners != None:
         raise NotImplementedError("not implement F.interpolate totoaly")
-    x = raw(input, size, scale_factor, mode)
 
-    layer_name = log.add_layer(name='upsample')
-    top_blobs = log.add_blobs([x], name='upsample_blob'.format(type))
-    layer = caffe_net.Layer_param(name=layer_name,
-                                  type='Upsample',
-                                  bottom=[log.blobs(input)],
-                                  top=top_blobs)
+    print(
+        "WARNING: _interpolate (upsample layer) only implements nearest"
+        "neighbor upsampling with scale_factor=2"
+    )
+    return F.conv_transpose2d(
+                input,
+                torch.ones([int(input.shape[1]), 1, 2, 2]),
+                stride=2,
+                groups=int(input.shape[1])
+            )
 
-    layer.upsample_param(size=(input.size(2), input.size(3)),
-                         scale_factor=scale_factor)
-    log.cnet.add_layer(layer)
-    return x
+    # The following seems to conform with another implementation of upsampling
+    # layer in caffe which I cannot find, so we use deconv to mimic upsampling.
+    # Luckily, the only upsample I need to do now is nearest neighbor upsampling
+    # so deconv does the trick. I didn't use the upsample layer implemented in
+    # caffe-segnet-cudnn5 because it needs another bottom blob (i.e. the mask)
+
+    # x = raw(input, size, scale_factor, mode)
+
+    # layer_name = log.add_layer(name='upsample')
+    # top_blobs = log.add_blobs([x], name='upsample_blob'.format(type))
+    # layer = caffe_net.Layer_param(name=layer_name,
+                                  # type='Upsample',
+                                  # bottom=[log.blobs(input)],
+                                  # top=top_blobs)
+
+    # layer.upsample_param(size=(input.size(2), input.size(3)),
+                         # scale_factor=scale_factor)
+    # log.cnet.add_layer(layer)
+    # return x
 
 
 #sigmid layer
@@ -635,7 +723,6 @@ def _hardtanh(raw, input, min_val, max_val, inplace):
     # torch.nn.ReLu6
     #
     # ​
-    print('relu6: ', log.blobs(input))
     x = raw(input, min_val, max_val)
     name = log.add_layer(name='relu6')
     log.add_blobs([x], name='relu6_blob')
@@ -689,7 +776,9 @@ def _view(input, *args):
                                   top=top_blobs)
     # TODO: reshpae added to nn_tools layer
     dims = list(args)
-    dims[0] = 0  # the first dim should be batch_size
+    # TODO ugliest hack for view(-1, 1) in this file
+    if len(dims) != 2:
+        dims[0] = 0  # the first dim should be batch_size
     layer.param.reshape_param.shape.CopyFrom(caffe_net.pb.BlobShape(dim=dims))
     log.cnet.add_layer(layer)
     return x
@@ -724,8 +813,14 @@ def _add(input, *args):
     layer_name = log.add_layer(name='add')
     top_blobs = log.add_blobs([x], name='add_blob')
     if log.blobs(args[0]) == None:
-        log.add_blobs([args[0]], name='extra_blob')
+        # log.add_blobs([args[0]], name='extra_blob')
+        # add_parameter_layer(args[0], 'add_extra_blob')
+        log.add_parameter_blob(args[0])
     else:
+        if log.blobs(input) == None:
+            # add_parameter_layer(input, 'add_extra_blob')
+            log.add_parameter_blob(input)
+
         layer = caffe_net.Layer_param(
             name=layer_name,
             type='Eltwise',
@@ -791,14 +886,47 @@ def _mul(input, *args):
     x = raw__mul__(input, *args)
     if not NET_INITTED:
         return x
+
     layer_name = log.add_layer(name='mul')
     top_blobs = log.add_blobs([x], name='mul_blob')
-    layer = caffe_net.Layer_param(
-        name=layer_name,
-        type='Eltwise',
-        bottom=[log.blobs(input), log.blobs(args[0])],
-        top=top_blobs)
-    layer.param.eltwise_param.operation = 0  # product is 0
+
+    if input.shape == args[0].shape:
+        # only do eltwise product when shape conforms as caffe doesn't
+        # support boradcast
+        layer = caffe_net.Layer_param(
+            name=layer_name,
+            type='Eltwise',
+            bottom=[log.blobs(input), log.blobs(args[0])],
+            top=top_blobs)
+        layer.param.eltwise_param.operation = 0  # product is 0
+    else:
+        # TODO add broadcastablity check
+        # broadcast using Flatten layer and Scale layer
+        # right now only supports [n, c, 1, 1] * [n, c, w, h]
+
+        # if log.blobs(input) is None:
+            # add_parameter_layer(input, 'mul_weight')
+        if args[0].dim() == 0:
+            layer = caffe_net.Layer_param(
+                name=layer_name,
+                type='Power',
+                bottom=[log.blobs(input)],
+                top=top_blobs
+            )
+
+            layer.param.power_param.power = 1
+            layer.param.power_param.scale = float(args[0])
+            layer.param.power_param.shift = 0
+
+        else:
+            flattened_input = torch.flatten(input, start_dim=1)
+            layer = caffe_net.Layer_param(
+                name=layer_name,
+                type='Scale',
+                bottom=[log.blobs(args[0]), log.blobs(flattened_input)],
+                top=top_blobs)
+            layer.param.scale_param.axis = 0
+
     log.cnet.add_layer(layer)
     return x
 
@@ -840,11 +968,16 @@ def _permute(inputx, *args):
     return x
 
 
+
+
 #contiguous
 def _contiguous(input, *args):
     x = raw__contiguous__(input, *args)
     name = log.add_layer(name='contiguous')
-    log.add_blobs([x], name='contiguous_blob')
+
+    if log.blobs(x) is None:
+        log.add_blobs([x], name='contiguous_blob')
+
     layer = caffe_net.Layer_param(name=name,
                                   type='NeedRemove',
                                   bottom=[log.blobs(input)],
@@ -903,7 +1036,7 @@ class Rp(object):
                 layer = stack[0].f_locals['self']
                 if layer in layer_names:
                     log.pytorch_layer_name = layer_names[layer]
-                    print(layer_names[layer])
+                    # print(layer_names[layer])
                     break
         out = self.obj(self.raw, *args, **kwargs)
         # if isinstance(out,Variable):
@@ -985,10 +1118,29 @@ except:
         t.sum = _sum
         raw__sqrt__ = t.sqrt
         t.sqrt = _sqrt
-        raw__unsqueeze__ = t.unsqueeze
-        t.unsqueeze = _unsqueeze
+        # comment this out to avoid blobs not found problem
+        # raw__unsqueeze__ = t.unsqueeze
+        # t.unsqueeze = _unsqueeze
         raw__expand_as__ = t.expand_as
         t.expand_as = _expand_as
+
+
+def _permute(inputx, *args):
+    x = raw__permute__(inputx, *args)
+    name = log.add_layer(name='permute')
+    log.add_blobs([x], name='permute_blob')
+    layer = caffe_net.Layer_param(name=name,
+                                  type='Permute',
+                                  bottom=[log.blobs(inputx)],
+                                  top=[log.blobs(x)])
+    order1 = args[0]
+    order2 = args[1]
+    order3 = args[2]
+    order4 = args[3]
+
+    layer.permute_param(order1, order2, order3, order4)
+    log.cnet.add_layer(layer)
+    return x
 
 
 def trans_net(net, input_var, name='TransferedPytorchModel'):
@@ -1001,7 +1153,7 @@ def trans_net(net, input_var, name='TransferedPytorchModel'):
     NET_INITTED = True
     for name, layer in net.named_modules():
         layer_names[layer] = name
-    print("torch ops name:", layer_names)
+    # print("torch ops name:", layer_names)
     out = net.forward(input_var)
     print('Transform Completed')
 
